@@ -15,7 +15,19 @@ namespace MusicHonorific;
 /// </summary>
 public static class MediaSessions
 {
-    public sealed record NowPlaying(string AppId, string AppName, string Title, string Artist, bool IsPlaying);
+    /// <summary>
+    /// <c>Position</c>/<c>Duration</c> 单位是秒；<c>AtMs</c> 是采集时刻（epoch 毫秒），
+    /// 用来在两次采集之间把进度往前推。
+    /// </summary>
+    public sealed record NowPlaying(
+        string AppId,
+        string AppName,
+        string Title,
+        string Artist,
+        bool IsPlaying,
+        double Position = 0,
+        double Duration = 0,
+        long AtMs = 0);
 
     /// <summary>结果超过这个时长没更新，就当桥接进程没在跑。</summary>
     private static readonly TimeSpan MaxAge = TimeSpan.FromSeconds(5);
@@ -96,7 +108,10 @@ public static class MediaSessions
                 DisplayFor(appId),
                 root.TryGetProperty("title", out var t) ? t.GetString() ?? string.Empty : string.Empty,
                 root.TryGetProperty("artist", out var a) ? a.GetString() ?? string.Empty : string.Empty,
-                root.TryGetProperty("playing", out var p) && p.GetBoolean());
+                root.TryGetProperty("playing", out var p) && p.GetBoolean(),
+                root.TryGetProperty("position", out var pos) && pos.TryGetDouble(out var pv) ? pv : 0,
+                root.TryGetProperty("duration", out var dur) && dur.TryGetDouble(out var dv) ? dv : 0,
+                root.TryGetProperty("at", out var at) && at.TryGetInt64(out var av) ? av : 0);
         }
         catch (Exception ex)
         {

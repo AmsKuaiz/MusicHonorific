@@ -33,6 +33,21 @@ public class Configuration : IPluginConfiguration
         "♪ {song} - {artist}♪",
     };
 
+    /// <summary>进度条格子数（占位符 {bar} 用）。</summary>
+    public int BarLength = 8;
+
+    /// <summary>
+    /// {bar} 的样式：
+    /// 0 = 圆圈 ●○、1 = 方框 ■□、2 = 计时（1:23/3:45）、3 = 自定义字符。
+    /// </summary>
+    public int BarStyle = 0;
+
+    /// <summary>自定义样式的填充字符（BarStyle = 3 时用）。</summary>
+    public string BarFilled = "◆";
+
+    /// <summary>自定义样式的空白字符（BarStyle = 3 时用）。</summary>
+    public string BarEmpty = "◇";
+
     /// <summary>
     /// 超过称号上限（32 字）时怎么办：
     /// 0 = 跳过这一行、1 = 只显示歌名（还超就截断）、2 = 直接截断。
@@ -42,10 +57,22 @@ public class Configuration : IPluginConfiguration
     /// <summary>true = 放到名字前面；false = 放到名字后面（称号位）。</summary>
     public bool IsPrefix = false;
 
-    /// <summary>停止播放后，要不要把称号撤掉。</summary>
-    public bool ClearWhenStopped = true;
+    /// <summary>
+    /// 切歌时怎么处理轮播：
+    /// 0 = 回到第一行、1 = 停在当前行继续。
+    /// </summary>
+    public int OnTrackChange = 0;
 
-    /// <summary>停多久才撤（秒）。0 = 立刻。</summary>
+    /// <summary>
+    /// 暂停/停止播放时怎么处理称号：
+    /// 0 = 撤掉、1 = 保留最后一行、2 = 显示下面的自定义文字。
+    /// </summary>
+    public int OnPause = 0;
+
+    /// <summary>暂停时显示的固定文字（OnPause = 2 时用）。</summary>
+    public string PauseText = "♪ 已暂停 ♪";
+
+    /// <summary>停止播放后多久执行上面那条规则（秒）。</summary>
     public int IdleClearSeconds = 0;
 
     /// <summary>是否用自定义颜色。</summary>

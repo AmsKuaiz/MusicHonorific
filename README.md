@@ -132,6 +132,14 @@ MusicHonorific\
 | `{song}` | 歌名 |
 | `{artist}` | 歌手 |
 | `{app}` | 正在使用的播放器（网易云音乐 / QQ音乐 / Apple Music / Spotify） |
+| `{elapsed}` | 已播放多久（暂停不计时，**任何播放器都支持**） |
+| `{bar}` | 进度条，样式可设（圆圈 / 方框 / 计时 / 自定义字符） |
+| `{pct}` | 进度百分比 |
+| `{pos}` | 已播放时间 `1:23` |
+| `{len}` | 总时长 `3:45` |
+
+> `{bar}`、`{pct}`、`{pos}`、`{len}` 需要播放器提供时长，目前 **Apple Music / Spotify** 支持；
+> 网易云、QQ音乐只有 `{elapsed}`。
 
 ### 设置项
 
@@ -200,16 +208,11 @@ Honorific 的称号上限是 32 字，超出部分会被截断或跳过。
 
 ---
 
-
 ## 参考与致谢
 
 - **[Honorific](https://github.com/Caraxi/Honorific)** — 称号渲染本体。通过其 IPC（`SetCharacterTitle` / `GetCharacterTitle` / `ClearCharacterTitle`）设置称号。
 - **[SpotifyHonorific](https://github.com/Valiice/SpotifyHonorific)** — 思路来源。沿用其「向 Honorific 推送 TitleData」的做法，数据源改为本地播放器。
-
-- Windows 平台 API：`Windows.Media.Control`（SMTC）、
-  `IAudioSessionManager2` / `IAudioMeterInformation`（CoreAudio 音频会话峰值）。
-
-### 相关地址（方便复制）
+- **[Dalamud](https://github.com/goatcorp/Dalamud)** — 插件框架与 ImGui 绑定。
 
 ```
 Honorific          https://github.com/Caraxi/Honorific

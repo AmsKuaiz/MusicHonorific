@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>
@@ -9,9 +9,15 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>MusicHonorific</AssemblyName>
     <RootNamespace>MusicHonorific</RootNamespace>
-    <Version>0.3.0.0</Version>
+    <Version>0.7.0.0</Version>
     <DalamudLibPath>C:\Users\32811\AppData\Roaming\XIVLauncherCN\addon\Hooks\15.0.3.8\</DalamudLibPath>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- github-upload 是给网页上传用的副本，不参与编译 -->
+    <Compile Remove="github-upload\**" />
+    <None Remove="github-upload\**" />
+  </ItemGroup>
 
   <ItemGroup>
     <Reference Include="Dalamud">

@@ -55,6 +55,16 @@ public sealed class Plugin : IDalamudPlugin
     /// <summary>当前是否在播放；暂停后就停止轮播。</summary>
     private bool _isPlaying;
 
+    /// <summary>播放进度（秒），只有 SMTC 来源才有。</summary>
+    private double _positionSeconds;
+    private double _durationSeconds;
+    private long _positionAtMs;
+
+    /// <summary>已播放计时：累计秒数 + 本轮起计时刻（暂停时结算）。</summary>
+    private double _elapsedSeconds;
+    private long _elapsedAtMs;
+    private bool _wasPlaying;
+
     /// <summary>停止播放后计时，超过设定秒数就撤掉称号。</summary>
     private readonly Stopwatch _idleTimer = Stopwatch.StartNew();
     private bool _titleCleared;
@@ -262,10 +272,11 @@ public sealed class Plugin : IDalamudPlugin
             RepairIfLost();
         }
 
-        // 没在播放：等一会儿还不动，就把称号撤掉
+        // 没在播放：按「暂停规则」处理
         if (!_isPlaying)
         {
-            if (!Config.ClearWhenStopped)
+            // 规则 1：保留最后一行，什么都不做
+            if (Config.OnPause == 1)
                 return;
 
             if (_idleTimer.Elapsed.TotalSeconds < Math.Max(0, Config.IdleClearSeconds))
@@ -274,8 +285,19 @@ public sealed class Plugin : IDalamudPlugin
             if (_titleCleared)
                 return;
 
-            ClearTitle();
             _titleCleared = true;
+
+            if (Config.OnPause == 2)
+            {
+                // 规则 2：换成固定的「已暂停」文字
+                _lastPayload = string.Empty;
+                PushTitle(Config.PauseText);
+                LastStatus = $"已暂停，显示：{Config.PauseText}";
+                return;
+            }
+
+            // 规则 0：撤掉称号
+            ClearTitle();
             _lastPayload = string.Empty;
             LastStatus = "没有在播放，称号已清掉（继续播放会自己回来）";
             return;
@@ -357,6 +379,11 @@ public sealed class Plugin : IDalamudPlugin
             appName = s.AppName;
             source = $"媒体会话 {s.AppId}";
             _isPlaying = true;
+
+            // 进度（SMTC 才给，窗口标题那条没有）
+            _positionSeconds = s.Position;
+            _durationSeconds = s.Duration;
+            _positionAtMs = s.AtMs;
         }
         else
         {
@@ -365,6 +392,8 @@ public sealed class Plugin : IDalamudPlugin
             if (title is null)
             {
                 _isPlaying = false;
+                _positionSeconds = 0;
+                _durationSeconds = 0;
                 LastStatus = $"没找到正在播放的播放器（找的是：{string.Join("、", Config.ProcessNames)}）";
                 return;
             }
@@ -402,10 +431,31 @@ public sealed class Plugin : IDalamudPlugin
             _lastRawTitle = raw;
             _current = parsed;
 
-            // 换歌了：轮播从头开始
-            _scrollIndex = 0;
-            _scrollTimer.Restart();
+            // 切歌规则：0 = 回到第一行，1 = 停在当前行
+            if (Config.OnTrackChange == 0)
+            {
+                _scrollIndex = 0;
+                _scrollTimer.Restart();
+            }
+
+            // 已播放计时归零；有位置的话直接用它当起点，更准
+            _elapsedSeconds = _durationSeconds > 0 ? _positionSeconds : 0;
+            _elapsedAtMs = _isPlaying ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() : 0;
         }
+
+        // 播放/暂停切换时，把已播放时间结账
+        if (_isPlaying && !_wasPlaying)
+        {
+            _elapsedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        }
+        else if (!_isPlaying && _wasPlaying)
+        {
+            if (_elapsedAtMs > 0)
+                _elapsedSeconds += (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _elapsedAtMs) / 1000.0;
+            _elapsedAtMs = 0;
+        }
+
+        _wasPlaying = _isPlaying;
 
         // 没在播放就不推称号（暂停=隐藏），交给 OnUpdate 那边决定清不清
         if (!_isPlaying)
@@ -440,7 +490,132 @@ public sealed class Plugin : IDalamudPlugin
             .Replace("{song}", _current.Song)
             .Replace("{artist}", _current.Artist)
             .Replace("{app}", _appName)
+            .Replace("{bar}", ProgressBar())
+            .Replace("{pct}", ProgressPercent())
+            .Replace("{pos}", ProgressPosition())
+            .Replace("{len}", ProgressDuration())
+            .Replace("{elapsed}", ElapsedText())
             .Trim();
+
+    /// <summary>这首歌已经播放了多久（暂停不计），任何播放器都能用。</summary>
+    private double Elapsed
+    {
+        get
+        {
+            var e = _elapsedSeconds;
+            if (_isPlaying && _elapsedAtMs > 0)
+                e += (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _elapsedAtMs) / 1000.0;
+
+            return e < 0 ? 0 : e;
+        }
+    }
+
+    private string ElapsedText() => FormatClock(Elapsed);
+
+    /// <summary>当前播放进度（0~1）；拿不到时长时返回 -1。</summary>
+    private double Progress
+    {
+        get
+        {
+            if (_durationSeconds <= 0)
+                return -1;
+
+            var pos = _positionSeconds;
+
+            // 两次采集之间自己往前推，进度条才会连续动
+            if (_isPlaying && _positionAtMs > 0)
+                pos += (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _positionAtMs) / 1000.0;
+
+            return Math.Clamp(pos / _durationSeconds, 0, 1);
+        }
+    }
+
+    private string ProgressBar()
+    {
+        // 计时样式：没有时长也能用「已听」
+        if (Config.BarStyle == 2)
+        {
+            if (Progress >= 0)
+                return $"{ProgressPosition()}/{ProgressDuration()}";
+
+            return ElapsedText();
+        }
+
+        var p = Progress;
+        if (p < 0)
+            return string.Empty;
+
+        var slots = Math.Clamp(Config.BarLength, 3, 20);
+        var filled = (int)Math.Round(p * slots);
+        if (filled > slots)
+            filled = slots;
+
+        var (on, off) = Config.BarStyle switch
+        {
+            1 => ("■", "□"),
+            3 => (
+                string.IsNullOrEmpty(Config.BarFilled) ? "●" : Config.BarFilled,
+                string.IsNullOrEmpty(Config.BarEmpty) ? "○" : Config.BarEmpty),
+            _ => ("●", "○"),
+        };
+
+        return string.Concat(Enumerable.Repeat(on, filled))
+             + string.Concat(Enumerable.Repeat(off, slots - filled));
+    }
+
+    private string ProgressPercent()
+    {
+        var p = Progress;
+        return p < 0 ? string.Empty : $"{(int)Math.Round(p * 100)}%";
+    }
+
+    private static string FormatClock(double seconds)
+    {
+        if (seconds < 0)
+            seconds = 0;
+
+        var total = (int)seconds;
+        return $"{total / 60}:{total % 60:00}";
+    }
+
+    private string ProgressPosition()
+    {
+        if (Progress < 0)
+            return string.Empty;
+
+        var pos = _positionSeconds;
+        if (_isPlaying && _positionAtMs > 0)
+            pos += (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _positionAtMs) / 1000.0;
+
+        return FormatClock(pos);
+    }
+
+    private string ProgressDuration()
+        => Progress < 0 ? string.Empty : FormatClock(_durationSeconds);
+
+    /// <summary>{bar} 的样式，顺序对应 Configuration.BarStyle。</summary>
+    private static readonly string[] BarStyles =
+    {
+        "圆圈 ●○",
+        "方框 ■□",
+        "计时 1:23/3:45",
+        "自定义字符",
+    };
+
+    /// <summary>切歌时的处理方式，顺序对应 Configuration.OnTrackChange。</summary>
+    private static readonly string[] TrackChangeModes =
+    {
+        "回到第一行",
+        "停在当前行",
+    };
+
+    /// <summary>暂停/停止时的处理方式，顺序对应 Configuration.OnPause。</summary>
+    private static readonly string[] PauseModes =
+    {
+        "撤掉称号",
+        "保留最后一行",
+        "显示自定义文字",
+    };
 
     /// <summary>超长时的处理方式，顺序对应 Configuration.OverflowMode。</summary>
     private static readonly string[] OverflowModes =
@@ -671,6 +846,12 @@ public sealed class Plugin : IDalamudPlugin
                 ImGui.TextWrapped(_current.Song +
                     (string.IsNullOrEmpty(_current.Artist) ? "" : $" — {_current.Artist}"));
 
+            if (_isPlaying)
+            {
+                ImGui.SameLine();
+                ImGui.TextDisabled($"· 已播放 {ElapsedText()}");
+            }
+
             ImGui.TextDisabled(LastStatus);
         }
 
@@ -709,6 +890,8 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.TextUnformatted("称号内容（一行一句）");
         ImGui.TextDisabled("一行静止；多行自动轮播");
         ImGui.TextDisabled("占位符：{song} 歌名、{artist} 歌手、{app} 播放器");
+        ImGui.TextDisabled("进度：{bar} {pct} {pos} {len}（仅 Apple Music / Spotify）");
+        ImGui.TextDisabled("已播放：{elapsed}（任何播放器都能用，暂停不计时）");
 
         var joined = string.Join("\n", Config.Lines);
         if (ImGui.InputTextMultiline("##lines", ref joined, 2048, new Vector2(-1, 92)))
@@ -720,6 +903,42 @@ public sealed class Plugin : IDalamudPlugin
                 .ToArray();
             changed = true;
         }
+
+        ImGui.Spacing();
+        ImGui.SetNextItemWidth(200);
+        if (ImGui.BeginCombo("进度条样式", BarStyles[Math.Clamp(Config.BarStyle, 0, 3)]))
+        {
+            for (var i = 0; i < BarStyles.Length; i++)
+            {
+                if (ImGui.Selectable(BarStyles[i], i == Config.BarStyle))
+                {
+                    Config.BarStyle = i;
+                    changed = true;
+                }
+            }
+
+            ImGui.EndCombo();
+        }
+
+        if (Config.BarStyle is 0 or 1 or 3)
+        {
+            ImGui.SetNextItemWidth(120);
+            if (ImGui.InputInt("格子数", ref Config.BarLength, 1, 2))
+                changed = true;
+            Config.BarLength = Math.Clamp(Config.BarLength, 3, 20);
+        }
+
+        if (Config.BarStyle == 3)
+        {
+            ImGui.SetNextItemWidth(60);
+            changed |= ImGui.InputText("填充", ref Config.BarFilled, 4);
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(60);
+            changed |= ImGui.InputText("空白", ref Config.BarEmpty, 4);
+        }
+
+        ImGui.SameLine();
+        ImGui.TextDisabled($"  当前：{ProgressBar()}");
 
         ImGui.Spacing();
         ImGui.SetNextItemWidth(260);
@@ -742,15 +961,58 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.SameLine();
         ImGui.TextDisabled("（不勾就占称号位）");
 
-        changed |= ImGui.Checkbox("停止播放后撤掉称号", ref Config.ClearWhenStopped);
-        if (Config.ClearWhenStopped)
+        ImGui.Unindent();
+
+        // ── 区块：播放规则 ──────────────────────────────────────
+        SectionHeader("播放规则");
+
+        ImGui.Indent();
+        ImGui.SetNextItemWidth(260);
+        if (ImGui.BeginCombo("切歌时", TrackChangeModes[Math.Clamp(Config.OnTrackChange, 0, 1)]))
+        {
+            for (var i = 0; i < TrackChangeModes.Length; i++)
+            {
+                if (ImGui.Selectable(TrackChangeModes[i], i == Config.OnTrackChange))
+                {
+                    Config.OnTrackChange = i;
+                    changed = true;
+                }
+            }
+
+            ImGui.EndCombo();
+        }
+
+        ImGui.SetNextItemWidth(260);
+        if (ImGui.BeginCombo("暂停/停止时", PauseModes[Math.Clamp(Config.OnPause, 0, 2)]))
+        {
+            for (var i = 0; i < PauseModes.Length; i++)
+            {
+                if (ImGui.Selectable(PauseModes[i], i == Config.OnPause))
+                {
+                    Config.OnPause = i;
+                    changed = true;
+                }
+            }
+
+            ImGui.EndCombo();
+        }
+
+        if (Config.OnPause == 2)
+        {
+            ImGui.SetNextItemWidth(260);
+            changed |= ImGui.InputText("暂停时显示的文字", ref Config.PauseText, 64);
+        }
+
+        if (Config.OnPause != 1)
         {
             ImGui.SetNextItemWidth(140);
-            if (ImGui.InputInt("停多久撤掉（秒）", ref Config.IdleClearSeconds, 5, 30))
+            if (ImGui.InputInt("停多久才生效（秒）", ref Config.IdleClearSeconds, 5, 30))
                 changed = true;
             Config.IdleClearSeconds = Math.Clamp(Config.IdleClearSeconds, 0, 3600);
             ImGui.TextDisabled("0 = 立刻；10~20 秒可以避免切歌时闪");
         }
+
+        ImGui.Unindent();
 
         ImGui.Unindent();
 

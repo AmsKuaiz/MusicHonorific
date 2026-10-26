@@ -58,12 +58,34 @@ while (true)
                 continue;
 
             var props = await s.TryGetMediaPropertiesAsync();
+
+            // 播放进度：位置 + 总时长（有些播放器不给，就是 0）
+            double position = 0, duration = 0;
+            try
+            {
+                var tl = s.GetTimelineProperties();
+                if (tl is not null)
+                {
+                    position = tl.Position.TotalSeconds;
+                    duration = (tl.EndTime - tl.StartTime).TotalSeconds;
+                    if (duration <= 0)
+                        duration = 0;
+                }
+            }
+            catch
+            {
+                // 拿不到就当没有进度
+            }
+
             best = new
             {
                 appId,
                 title = props?.Title ?? string.Empty,
                 artist = CleanArtist(props?.Artist ?? string.Empty),
                 playing,
+                position,
+                duration,
+                at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 ok = true,
             };
             bestPlaying = playing;
