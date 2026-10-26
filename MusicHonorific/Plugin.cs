@@ -530,6 +530,30 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
+    /// <summary>
+    /// 实际用来画进度条的值（0~1）。
+    /// 播放器给了真实时长就用真的；没给就按「没有时长时」的规则估算。
+    /// 返回 -1 表示不显示。
+    /// </summary>
+    private double EffectiveProgress
+    {
+        get
+        {
+            var real = Progress;
+            if (real >= 0)
+                return real;
+
+            return Config.NoDurationMode switch
+            {
+                // 按估算时长填充：一直涨到 100% 就停
+                1 => Math.Clamp(Elapsed / Math.Max(10, Config.AssumedSeconds), 0, 1),
+                // 循环流动：满了从头再来，纯装饰
+                2 => Math.Clamp(Elapsed % Math.Max(5, Config.CycleSeconds) / Math.Max(5, Config.CycleSeconds), 0, 1),
+                _ => -1,
+            };
+        }
+    }
+
     private string ProgressBar()
     {
         // 计时样式：没有时长也能用「已听」
@@ -541,7 +565,7 @@ public sealed class Plugin : IDalamudPlugin
             return ElapsedText();
         }
 
-        var p = Progress;
+        var p = EffectiveProgress;
         if (p < 0)
             return string.Empty;
 
@@ -565,7 +589,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private string ProgressPercent()
     {
-        var p = Progress;
+        var p = EffectiveProgress;
         return p < 0 ? string.Empty : $"{(int)Math.Round(p * 100)}%";
     }
 
@@ -593,12 +617,20 @@ public sealed class Plugin : IDalamudPlugin
     private string ProgressDuration()
         => Progress < 0 ? string.Empty : FormatClock(_durationSeconds);
 
+    /// <summary>拿不到总时长时怎么画条，顺序对应 Configuration.NoDurationMode。</summary>
+    private static readonly string[] NoDurationModes =
+    {
+        "不显示（留空）",
+        "按估算时长填充",
+        "循环流动（纯装饰）",
+    };
+
     /// <summary>{bar} 的样式，顺序对应 Configuration.BarStyle。</summary>
     private static readonly string[] BarStyles =
     {
-        "圆圈 ●○",
-        "方框 ■□",
-        "计时 1:23/3:45",
+        "圆圈",
+        "方框",
+        "计时",
         "自定义字符",
     };
 
@@ -940,6 +972,40 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.SameLine();
         ImGui.TextDisabled($"  当前：{ProgressBar()}");
 
+        if (Config.BarStyle is 0 or 1 or 3)
+        {
+            ImGui.Spacing();
+            ImGui.SetNextItemWidth(260);
+            if (ImGui.BeginCombo("没有总时长时", NoDurationModes[Math.Clamp(Config.NoDurationMode, 0, 2)]))
+            {
+                for (var i = 0; i < NoDurationModes.Length; i++)
+                {
+                    if (ImGui.Selectable(NoDurationModes[i], i == Config.NoDurationMode))
+                    {
+                        Config.NoDurationMode = i;
+                        changed = true;
+                    }
+                }
+
+                ImGui.EndCombo();
+            }
+
+            if (Config.NoDurationMode == 1)
+            {
+                ImGui.SetNextItemWidth(140);
+                if (ImGui.InputInt("按多长估算（秒）", ref Config.AssumedSeconds, 15, 60))
+                    changed = true;
+                Config.AssumedSeconds = Math.Clamp(Config.AssumedSeconds, 30, 900);
+            }
+            else if (Config.NoDurationMode == 2)
+            {
+                ImGui.SetNextItemWidth(140);
+                if (ImGui.InputInt("循环一圈（秒）", ref Config.CycleSeconds, 5, 10))
+                    changed = true;
+                Config.CycleSeconds = Math.Clamp(Config.CycleSeconds, 5, 300);
+            }
+        }
+
         ImGui.Spacing();
         ImGui.SetNextItemWidth(260);
         if (ImGui.BeginCombo("超过 32 字时", OverflowModes[Math.Clamp(Config.OverflowMode, 0, 2)]))
@@ -1148,9 +1214,15 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.Spacing();
         ImGui.PopStyleVar();
 
-        // 改动即时保存
+        // 改动即时保存，并立刻按新设置重推一次称号
+        // （否则改了样式/内容，在暂停或没切歌时会一直挂着旧文字）
         if (changed)
+        {
             Save();
+            _lastPayload = string.Empty;
+            _pollTimer.Restart();
+            PollOnce();
+        }
 
         ImGui.End();
     }

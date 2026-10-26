@@ -49,6 +49,18 @@ public class Configuration : IPluginConfiguration
     public string BarEmpty = "◇";
 
     /// <summary>
+    /// 播放器不给总时长时怎么画进度条（网易云、QQ音乐）：
+    /// 0 = 不显示、1 = 按估算时长填充、2 = 循环流动（纯装饰）。
+    /// </summary>
+    public int NoDurationMode = 1;
+
+    /// <summary>估算时长（秒）。NoDurationMode = 1 时用，默认 3 分 30 秒。</summary>
+    public int AssumedSeconds = 210;
+
+    /// <summary>循环流动一圈要多少秒。NoDurationMode = 2 时用。</summary>
+    public int CycleSeconds = 30;
+
+    /// <summary>
     /// 超过称号上限（32 字）时怎么办：
     /// 0 = 跳过这一行、1 = 只显示歌名（还超就截断）、2 = 直接截断。
     /// </summary>
