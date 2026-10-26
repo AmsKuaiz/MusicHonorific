@@ -1,4 +1,18 @@
-"DownloadLinkInstall": "https://github.com/AmsKuaiz/MusicHonorific/releases/download/v0.1.9/NestmusicHonorific.zip",
-"DownloadLinkUpdate":  "https://github.com/AmsKuaiz/MusicHonorific/releases/download/v0.1.9/NestmusicHonorific.zip",
-"IconUrl": "https://raw.githubusercontent.com/AmsKuaiz/MusicHonorific/main/NestmusicHonorific/images/icon.png",
-"RepoUrl": "https://github.com/AmsKuaiz/MusicHonorific"
+[
+  {
+    "Author": "AmsKuaiz",
+    "Name": "Music Honorific",
+    "Punchline": "把正在播放的歌，显示成游戏里的称号",
+    "Description": "支持网易云音乐、QQ音乐、Apple Music、Spotify。读取播放器窗口标题或系统媒体会话里的「歌名 - 歌手」，通过 Honorific 的 IPC 显示为角色称号，支持多行轮播、渐变与发光。不需要账号、API 密钥或额外播放器。",
+    "InternalName": "NestmusicHonorific",
+    "AssemblyVersion": "0.1.9.0",
+    "RepoUrl": "https://github.com/AmsKuaiz/MusicHonorific",
+    "ApplicableVersion": "any",
+    "DalamudApiLevel": 15,
+    "Tags": ["music", "honorific", "netease", "spotify"],
+    "CategoryTags": ["other"],
+    "DownloadLinkInstall": "https://github.com/AmsKuaiz/MusicHonorific/releases/download/v0.1.9/NestmusicHonorific.zip",
+    "DownloadLinkUpdate": "https://github.com/AmsKuaiz/MusicHonorific/releases/download/v0.1.9/NestmusicHonorific.zip",
+    "IconUrl": "https://raw.githubusercontent.com/AmsKuaiz/MusicHonorific/main/NestmusicHonorific/images/icon.png"
+  }
+]
