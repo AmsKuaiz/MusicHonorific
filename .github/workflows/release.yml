@@ -1,0 +1,143 @@
+name: Build and Release
+
+on:
+  # 手动跑：填个版本号即可
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（例如 0.9.1，会自动补成 0.9.1.0）'
+        required: true
+        type: string
+
+  # 推 tag 自动跑：v0.9.1
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # ── 版本号 ──────────────────────────────────────────
+      - name: 解析版本号
+        id: ver
+        shell: pwsh
+        run: |
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $v = '${{ inputs.version }}'.Trim().TrimStart('v')
+          } else {
+            $v = '${{ github.ref_name }}'.Trim().TrimStart('v')
+          }
+
+          # 统一成四段：0.9.1 -> 0.9.1.0
+          $parts = $v.Split('.')
+          while ($parts.Count -lt 4) { $parts += '0' }
+          $full = ($parts[0..3] -join '.')
+
+          "version=$full" >> $env:GITHUB_OUTPUT
+          "tag=v$v" >> $env:GITHUB_OUTPUT
+          Write-Host "版本: $full   标签: v$v"
+
+      # ── 依赖：Dalamud ───────────────────────────────────
+      - name: 下载 Dalamud
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri 'https://goatcorp.github.io/dalamud-distrib/latest.zip' -OutFile dalamud.zip
+          Expand-Archive dalamud.zip -DestinationPath dalamud -Force
+          if (-not (Test-Path 'dalamud/Dalamud.dll')) { throw 'Dalamud.dll 没解出来' }
+          Write-Host 'Dalamud 就绪'
+
+      # ── 写入版本号 ──────────────────────────────────────
+      - name: 写入版本号
+        shell: pwsh
+        run: |
+          $v = '${{ steps.ver.outputs.version }}'
+
+          $proj = 'MusicHonorific/MusicHonorific.csproj'
+          (Get-Content $proj -Raw) -replace '<Version>[^<]*</Version>', "<Version>$v</Version>" |
+            Set-Content $proj -Encoding UTF8
+
+          $man = 'MusicHonorific/MusicHonorific.json'
+          (Get-Content $man -Raw) -replace '"AssemblyVersion"\s*:\s*"[^"]*"', "`"AssemblyVersion`": `"$v`"" |
+            Set-Content $man -Encoding UTF8
+
+          Write-Host "已写入 $v"
+
+      # ── 编译 ────────────────────────────────────────────
+      - name: 编译插件
+        shell: pwsh
+        run: |
+          dotnet build MusicHonorific/MusicHonorific.csproj -c Release `
+            -p:DalamudLibPath="${{ github.workspace }}\dalamud\\"
+
+      - name: 编译媒体会话桥接
+        shell: pwsh
+        run: |
+          dotnet publish SmtcBridge/SmtcBridge.csproj -c Release -r win-x64 --self-contained false
+
+      # ── 打包 ────────────────────────────────────────────
+      - name: 组装插件包
+        shell: pwsh
+        run: |
+          $out  = 'MusicHonorific/bin/Release/net10.0-windows'
+          $dist = 'dist'
+
+          New-Item -ItemType Directory $dist -Force | Out-Null
+          Copy-Item "$out/MusicHonorific.dll" $dist -Force
+          Copy-Item 'MusicHonorific/MusicHonorific.json' $dist -Force   # 清单从源码目录取，构建不会自动复制
+          Copy-Item 'MusicHonorific/images' $dist -Recurse -Force
+          Copy-Item 'SmtcBridge/bin/Release/net10.0-windows10.0.19041.0/win-x64/publish' "$dist/bridge" -Recurse -Force
+
+          Compress-Archive -Path "$dist/*" -DestinationPath MusicHonorific.zip -Force
+
+          $size = (Get-Item MusicHonorific.zip).Length / 1MB
+          Write-Host ("包大小: {0:N1} MB" -f $size)
+
+      # ── 发 Release ──────────────────────────────────────
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          files: MusicHonorific.zip
+          generate_release_notes: true
+
+      # ── 更新 repo.json（Dalamud 靠它判断更新）────────────
+      - name: 更新 repo.json
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.ver.outputs.tag }}'
+          $v   = '${{ steps.ver.outputs.version }}'
+          $url = "https://github.com/${{ github.repository }}/releases/download/$tag/MusicHonorific.zip"
+
+          $j = Get-Content 'repo.json' -Raw | ConvertFrom-Json
+          $j[0].AssemblyVersion     = $v
+          $j[0].DownloadLinkInstall = $url
+          $j[0].DownloadLinkUpdate  = $url
+          $j | ConvertTo-Json -Depth 10 | Set-Content 'repo.json' -Encoding UTF8
+
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add repo.json
+          git commit -m "chore: repo.json -> $tag"
+          if ($LASTEXITCODE -ne 0) { Write-Host 'repo.json 没变化，跳过' } else { git push }
+
+      - name: 完成
+        shell: pwsh
+        run: |
+          Write-Host "发布完成：${{ steps.ver.outputs.tag }}"
+          Write-Host "下载地址：https://github.com/${{ github.repository }}/releases/download/${{ steps.ver.outputs.tag }}/MusicHonorific.zip"
