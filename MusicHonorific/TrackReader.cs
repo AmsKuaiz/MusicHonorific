@@ -64,10 +64,12 @@ public static class TrackReader
     /// <summary>
     /// 挨个进程找带标题的窗口。
     /// <para>优先返回「真的在出声」的那个（网易云开着但暂停时，不会抢走 Spotify）。</para>
+    /// <para>音频会话只枚举一次，同时把「选中的那个是否在播放」一并返回，省一半开销。</para>
     /// </summary>
-    public static string? GetWindowTitle(string[] processNames, out string? matchedProcess)
+    public static string? GetWindowTitle(string[] processNames, out string? matchedProcess, out bool playing)
     {
         matchedProcess = null;
+        playing = false;
 
         // 先收集所有候选人：(进程名, 窗口标题)
         var candidates = new List<(string Name, string Title)>();
@@ -104,7 +106,7 @@ public static class TrackReader
         if (candidates.Count == 0)
             return null;
 
-        // 谁在出声
+        // 谁在出声（只查一次）
         var playingNames = PlayingProcessNames();
 
         foreach (var c in candidates)
@@ -112,6 +114,7 @@ public static class TrackReader
             if (playingNames.Contains(c.Name))
             {
                 matchedProcess = c.Name;
+                playing = true;
                 return c.Title;
             }
         }
@@ -121,26 +124,38 @@ public static class TrackReader
         return candidates[0].Title;
     }
 
-    /// <summary>这个进程当前是否真的在出声（用来判断暂停/播放）。</summary>
-    public static bool IsProcessPlaying(string? processName)
-        => !string.IsNullOrWhiteSpace(processName) && PlayingProcessNames().Contains(processName);
+    /// <summary>
+    /// 「正在出声的进程名」。COM 枚举音频会话比较重，
+    /// 缓存 5 秒，避免每次轮询都做一遍。
+    /// </summary>
+    private static HashSet<string>? _playingCache;
+    private static long _playingCacheAt;
+    private static readonly object _playingLock = new();
 
-    /// <summary>取「正在出声」的进程名集合。</summary>
     private static HashSet<string> PlayingProcessNames()
     {
-        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var pid in AudioSessions.GetPlayingProcessIds())
+        lock (_playingLock)
         {
-            try
-            {
-                using var p = Process.GetProcessById((int)pid);
-                names.Add(p.ProcessName);
-            }
-            catch { /* 进程已经退了就跳过 */ }
-        }
+            var now = Environment.TickCount64;
+            if (_playingCache is not null && now - _playingCacheAt < 5000)
+                return _playingCache;
 
-        return names;
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var pid in AudioSessions.GetPlayingProcessIds())
+            {
+                try
+                {
+                    using var p = Process.GetProcessById((int)pid);
+                    names.Add(p.ProcessName);
+                }
+                catch { /* 进程已经退了就跳过 */ }
+            }
+
+            _playingCache = names;
+            _playingCacheAt = now;
+            return names;
+        }
     }
 
     /// <summary>把「歌名 - 歌手 - QQ音乐」这种尾巴剥干净。</summary>

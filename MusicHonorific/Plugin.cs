@@ -69,8 +69,14 @@ public sealed class Plugin : IDalamudPlugin
     private readonly Stopwatch _idleTimer = Stopwatch.StartNew();
     private bool _titleCleared;
 
-    /// <summary>SMTC 缓存，由后台线程更新（UI 线程不能阻塞在 WinRT 调用上）。</summary>
+    /// <summary>SMTC 缓存，由后台线程更新。</summary>
     private volatile MediaSessions.NowPlaying? _smtc;
+
+    /// <summary>后台线程算好的播放状态快照；主线程只读它。</summary>
+    private volatile Snapshot? _snapshot;
+    private int _snapSeq;
+    private int _appliedSeq;
+    private volatile bool _forcePoll;
 
     private volatile bool _running = true;
     private Thread? _smtcThread;
@@ -119,10 +125,10 @@ public sealed class Plugin : IDalamudPlugin
         _bridgeJsonPath = Path.Combine(Path.GetTempPath(), "music-honorific-bridge.json");
         StartBridge();
 
-        _smtcThread = new Thread(SmtcLoop)
+        _smtcThread = new Thread(WorkerLoop)
         {
             IsBackground = true,
-            Name = "MusicHonorific.SMTC",
+            Name = "MusicHonorific.Worker",
         };
         _smtcThread.Start();
 
@@ -150,11 +156,18 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnCommand(string command, string args) => ToggleWindow();
 
-    /// <summary>后台循环：定期读桥接进程写的媒体会话状态。</summary>
-    private void SmtcLoop()
+    /// <summary>
+    /// 后台循环：读桥接 JSON + 按间隔做一次「重活」（枚举进程、COM 音频会话）。
+    /// 这些全在主线程做会明显掉帧，所以统一放这里。
+    /// </summary>
+    private void WorkerLoop()
     {
+        var sw = Stopwatch.StartNew();
+        var lastPoll = -1L;
+
         while (_running)
         {
+            // 读桥接文件很便宜，200ms 一次
             try
             {
                 _smtc = MediaSessions.GetNowPlaying(_bridgeJsonPath);
@@ -164,9 +177,25 @@ public sealed class Plugin : IDalamudPlugin
                 _smtc = null;
             }
 
-            // 分小段睡，卸载时能及时退出
-            for (var i = 0; i < 10 && _running; i++)
-                Thread.Sleep(100);
+            var interval = Math.Max(1000, Config.PollIntervalMs);
+            var due = _forcePoll || sw.ElapsedMilliseconds - lastPoll >= interval;
+
+            if (due)
+            {
+                _forcePoll = false;
+                lastPoll = sw.ElapsedMilliseconds;
+
+                try
+                {
+                    _snapshot = BuildSnapshot(++_snapSeq);
+                }
+                catch (Exception ex)
+                {
+                    Log.Debug(ex, "后台采集失败");
+                }
+            }
+
+            Thread.Sleep(200);
         }
     }
 
@@ -264,11 +293,18 @@ public sealed class Plugin : IDalamudPlugin
 
         _wasEnabled = true;
 
-        // 单次轮询：读标题
+        // 后台线程采到新状态就应用（很便宜：只有赋值 + 一次推送）
+        var snap = _snapshot;
+        if (snap is not null && snap.Seq != _appliedSeq)
+        {
+            _appliedSeq = snap.Seq;
+            ApplySnapshot(snap);
+        }
+
+        // 补回被 Honorific 清掉的称号（IPC 调用很轻，按间隔来）
         if (_pollTimer.ElapsedMilliseconds >= EffectiveIntervalMs)
         {
             _pollTimer.Restart();
-            PollOnce();
             RepairIfLost();
         }
 
@@ -363,73 +399,94 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    private void PollOnce()
-    {
-        string raw;
-        TrackReader.Track parsed;
-        string appName;
-        string source;
+    /// <summary>后台线程采集到的播放状态（不可变，主线程只读）。</summary>
+    private sealed record Snapshot(
+        int Seq,
+        string Raw,
+        string Song,
+        string Artist,
+        string AppName,
+        string Source,
+        bool Playing,
+        double Pos,
+        double Dur,
+        long AtMs,
+        string? Note);
 
+    /// <summary>
+    /// 重活：SMTC 判断、枚举进程、查音频会话。
+    /// <b>只能在后台线程调用</b>，主线程调用会掉帧。
+    /// </summary>
+    private Snapshot BuildSnapshot(int seq)
+    {
         // 1) 先看系统媒体会话（Apple Music、Spotify 这类窗口标题不带歌名的靠它）
         var smtc = _smtc;
         if (smtc is { IsPlaying: true } s && !string.IsNullOrWhiteSpace(s.Title))
         {
-            raw = string.IsNullOrWhiteSpace(s.Artist) ? s.Title : $"{s.Title} - {s.Artist}";
-            parsed = new TrackReader.Track(s.Title.Trim(), s.Artist.Trim());
-            appName = s.AppName;
-            source = $"媒体会话 {s.AppId}";
-            _isPlaying = true;
+            var raw = string.IsNullOrWhiteSpace(s.Artist) ? s.Title : $"{s.Title} - {s.Artist}";
+            return new Snapshot(seq, raw, s.Title.Trim(), s.Artist.Trim(), s.AppName,
+                $"媒体会话 {s.AppId}", true, s.Position, s.Duration, s.AtMs, null);
+        }
 
-            // 进度（SMTC 才给，窗口标题那条没有）
-            _positionSeconds = s.Position;
-            _durationSeconds = s.Duration;
-            _positionAtMs = s.AtMs;
+        // 2) 退回窗口标题（网易云、QQ音乐这些）
+        var title = TrackReader.GetWindowTitle(Config.ProcessNames, out var matched, out var playing);
+        if (title is null)
+        {
+            return new Snapshot(seq, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty,
+                false, 0, 0, 0,
+                $"没找到正在播放的播放器（找的是：{string.Join("、", Config.ProcessNames)}）");
+        }
+
+        var parsed = TrackReader.Parse(title);
+        var app = TrackReader.DisplayName(matched);
+        if (string.IsNullOrWhiteSpace(app))
+            app = "音乐";
+
+        // 客户端的窗口标题在没播歌时会是应用名之类，这种不覆盖
+        if (Config.IgnoreTitles.Any(t => string.Equals(t, title, StringComparison.OrdinalIgnoreCase)))
+        {
+            return new Snapshot(seq, title, parsed.Song, parsed.Artist, app,
+                $"窗口标题 {matched}", false, 0, 0, 0, $"忽略：{title}");
+        }
+
+        return new Snapshot(seq, title, parsed.Song, parsed.Artist, app,
+            $"窗口标题 {matched}", playing, 0, 0, 0,
+            parsed.IsEmpty ? $"没解析出歌名：{title}" : null);
+    }
+
+    /// <summary>主线程：把后台采集到的状态应用到插件上（很便宜，只有赋值和一次推送）。</summary>
+    private void ApplySnapshot(Snapshot snap)
+    {
+        _matchedProcess = snap.Source;
+        _appName = string.IsNullOrWhiteSpace(snap.AppName) ? "音乐" : snap.AppName;
+        _isPlaying = snap.Playing;
+
+        if (snap.Dur > 0 || snap.Pos > 0)
+        {
+            _positionSeconds = snap.Pos;
+            _durationSeconds = snap.Dur;
+            _positionAtMs = snap.AtMs;
         }
         else
         {
-            // 2) 退回窗口标题（网易云、QQ音乐这些）
-            var title = TrackReader.GetWindowTitle(Config.ProcessNames, out var matched);
-            if (title is null)
-            {
-                _isPlaying = false;
-                _positionSeconds = 0;
-                _durationSeconds = 0;
-                LastStatus = $"没找到正在播放的播放器（找的是：{string.Join("、", Config.ProcessNames)}）";
-                return;
-            }
-
-            raw = title;
-            parsed = TrackReader.Parse(title);
-            appName = TrackReader.DisplayName(matched);
-            source = $"窗口标题 {matched}";
-
-            // 窗口标题判断不了暂停，靠音频会话看它有没有在出声
-            _isPlaying = TrackReader.IsProcessPlaying(matched);
-
-            if (string.IsNullOrWhiteSpace(appName))
-                appName = "音乐";
-
-            // 客户端的窗口标题在没播歌时会是应用名之类，这种不覆盖
-            if (Config.IgnoreTitles.Any(t => string.Equals(t, raw, StringComparison.OrdinalIgnoreCase)))
-            {
-                LastStatus = $"忽略：{raw}";
-                return;
-            }
+            _positionSeconds = 0;
+            _durationSeconds = 0;
+            _positionAtMs = 0;
         }
 
-        _appName = appName;
-        _matchedProcess = source;
-
-        if (parsed.IsEmpty)
+        if (snap.Note is not null)
         {
-            LastStatus = $"没解析出歌名：{raw}";
+            LastStatus = snap.Note;
             return;
         }
 
-        if (raw != _lastRawTitle)
+        if (string.IsNullOrEmpty(snap.Raw))
+            return;
+
+        if (snap.Raw != _lastRawTitle)
         {
-            _lastRawTitle = raw;
-            _current = parsed;
+            _lastRawTitle = snap.Raw;
+            _current = new TrackReader.Track(snap.Song, snap.Artist);
 
             // 切歌规则：0 = 回到第一行，1 = 停在当前行
             if (Config.OnTrackChange == 0)
@@ -441,6 +498,10 @@ public sealed class Plugin : IDalamudPlugin
             // 已播放计时归零；有位置的话直接用它当起点，更准
             _elapsedSeconds = _durationSeconds > 0 ? _positionSeconds : 0;
             _elapsedAtMs = _isPlaying ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() : 0;
+        }
+        else
+        {
+            _current = new TrackReader.Track(snap.Song, snap.Artist);
         }
 
         // 播放/暂停切换时，把已播放时间结账
@@ -464,7 +525,6 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        // 换歌时从第一行重新开始
         var text = Config.Lines.Length > 0
             ? FitLine(Config.Lines[Math.Clamp(_scrollIndex, 0, Config.Lines.Length - 1)])
             : null;
@@ -478,11 +538,9 @@ public sealed class Plugin : IDalamudPlugin
         _lastPayload = string.Empty;   // 换歌了，强制重推
         PushTitle(text!);
 
-        LastStatus = _isPlaying
-            ? (Config.Lines.Length > 1
-                ? $"轮播中（第 {_scrollIndex + 1}/{Config.Lines.Length} 行）：{text}"
-                : $"已推送：{text}")
-            : $"已暂停，停在：{text}";
+        LastStatus = Config.Lines.Length > 1
+            ? $"轮播中（第 {_scrollIndex + 1}/{Config.Lines.Length} 行）：{text}"
+            : $"已推送：{text}";
     }
 
     private string RenderLine(string template)
@@ -894,11 +952,12 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.Spacing();
         if (ImGui.Button("立刻读一次"))
         {
+            // 只打标记，让后台线程去采集（主线程做这个会卡）
             _lastRawTitle = string.Empty;
             _pollTimer.Restart();
             _scrollTimer.Restart();
             _scrollIndex = 0;
-            PollOnce();
+            _forcePoll = true;
         }
 
         ImGui.SameLine();
@@ -1214,14 +1273,17 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.Spacing();
         ImGui.PopStyleVar();
 
-        // 改动即时保存，并立刻按新设置重推一次称号
-        // （否则改了样式/内容，在暂停或没切歌时会一直挂着旧文字）
+        // 改动即时保存，并让后台立刻重采一次（新设置下一帧就生效）
         if (changed)
         {
             Save();
             _lastPayload = string.Empty;
             _pollTimer.Restart();
-            PollOnce();
+            _forcePoll = true;
+
+            // 手上已有快照的话，就地按新设置重推一次，不用等后台
+            if (_snapshot is { } current)
+                ApplySnapshot(current);
         }
 
         ImGui.End();

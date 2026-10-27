@@ -33,13 +33,18 @@ string[] known =
     "kugou", "kwmusic", "migu", "cloudmusic", "netease",
 };
 
+// 会话管理器只取一次，之后复用。
+// 每轮都 RequestAsync 会让系统媒体服务反复初始化，拖慢整机（也会让游戏掉帧）。
+GlobalSystemMediaTransportControlsSessionManager? cachedMgr = null;
+
 while (true)
 {
     object payload;
 
     try
     {
-        var mgr = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
+        cachedMgr ??= await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
+        var mgr = cachedMgr;
         var best = (object?)null;
         var bestPlaying = false;
 
@@ -95,6 +100,7 @@ while (true)
     }
     catch (Exception ex)
     {
+        cachedMgr = null;   // 出问题就丢缓存，下轮重新取
         payload = new { ok = false, error = $"{ex.GetType().Name}: {ex.Message}" };
     }
 
@@ -109,7 +115,7 @@ while (true)
         // 写不进去就下一轮再试
     }
 
-    await Task.Delay(700);
+    await Task.Delay(1000);
 }
 
 static string CleanArtist(string artist)
