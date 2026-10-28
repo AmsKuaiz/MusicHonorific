@@ -1,4 +1,4 @@
-name: Build and Release
+﻿name: Build and Release
 
 on:
   # 手动跑：填个版本号即可
@@ -108,13 +108,23 @@ jobs:
           Write-Host ("包大小: {0:N1} MB" -f $size)
 
       # ── 发 Release ──────────────────────────────────────
+      - name: 准备发布说明
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'RELEASE_NOTES.md')) {
+            Set-Content 'RELEASE_NOTES.md' '见提交记录。' -Encoding UTF8
+          }
+          $len = (Get-Content 'RELEASE_NOTES.md' -Raw).Length
+          Write-Host "发布说明 $len 字符"
+
       - name: 发布 Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: ${{ steps.ver.outputs.tag }}
+          body_path: RELEASE_NOTES.md
           files: MusicHonorific.zip
-          generate_release_notes: true
+          generate_release_notes: false
 
       # ── 更新 repo.json（Dalamud 靠它判断更新）────────────
       - name: 更新 repo.json
@@ -134,7 +144,7 @@ jobs:
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           git add repo.json
           git commit -m "chore: repo.json -> $tag"
-          if ($LASTEXITCODE -ne 0) { Write-Host 'repo.json 没变化，跳过' } else { git push }
+          if ($LASTEXITCODE -ne 0) { Write-Host 'repo.json 没变化，跳过' } else { git push origin HEAD:main }
 
       - name: 完成
         shell: pwsh
