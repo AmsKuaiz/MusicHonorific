@@ -78,6 +78,11 @@ public sealed class Plugin : IDalamudPlugin
     private int _appliedSeq;
     private volatile bool _forcePoll;
 
+    /// <summary>Honorific 晚加载时，隔一会儿再确认一次；确认不到才报错。</summary>
+    private readonly Stopwatch _honorificCheckTimer = Stopwatch.StartNew();
+    private readonly Stopwatch _honorificErrorTimer = Stopwatch.StartNew();
+    private bool _honorificErrorShown;
+
     private volatile bool _running = true;
     private Thread? _smtcThread;
     private string _bridgeDir = string.Empty;
@@ -90,7 +95,21 @@ public sealed class Plugin : IDalamudPlugin
 
     public Plugin()
     {
-        Config = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
+        var loaded = PluginInterface.GetPluginConfig();
+
+        Config = loaded as Configuration ?? new Configuration();
+
+        // 配置有没有读出来 —— 读失败绝不能覆盖用户的文件，只写日志
+        if (loaded is null)
+        {
+            var cfgPath = Path.Combine(PluginInterface.GetPluginConfigDirectory(),
+                $"{PluginInterface.Manifest.InternalName}.json");
+
+            if (File.Exists(cfgPath))
+                Log.Warning($"配置读取失败（文件存在但解析不了）：{cfgPath}");
+            else
+                Log.Information($"首次运行，没有配置文件：{cfgPath}");
+        }
 
         // 老配置里颜色可能是 (0,0,0)（全黑，称号会看不见）——兜底成网易云蓝
         if (Config.Color == Vector3.Zero)
@@ -98,14 +117,11 @@ public sealed class Plugin : IDalamudPlugin
 
         // Honorific 的 IPC 即使对方没装也能「拿到订阅者」，只有真正调用才报错，
         // 所以这里查插件列表来判断对方在不在。
+        //
+        // 注意：插件加载顺序不确定，Honorific 可能比我们晚加载。
+        // 所以这里只做第一次检查，没找到也不急着报错 —— 交给 OnUpdate 过几秒再确认。
         HonorificAvailable = DetectHonorific();
         EnsureSubscribers();
-
-        if (!HonorificAvailable)
-        {
-            ChatGui.PrintError("没有找到 Honorific 插件，Music Honorific 无法修改称号。", CommandName);
-            Log.Warning("未检测到 Honorific，称号功能不可用。");
-        }
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
@@ -159,15 +175,17 @@ public sealed class Plugin : IDalamudPlugin
     /// <summary>
     /// 后台循环：读桥接 JSON + 按间隔做一次「重活」（枚举进程、COM 音频会话）。
     /// 这些全在主线程做会明显掉帧，所以统一放这里。
+    /// <para>没在播放时降低检查频率，长时间挂着也不占资源。</para>
     /// </summary>
     private void WorkerLoop()
     {
         var sw = Stopwatch.StartNew();
         var lastPoll = -1L;
+        var lastErrorLog = -60000L;
 
         while (_running)
         {
-            // 读桥接文件很便宜，200ms 一次
+            // 读桥接文件：文件没变会命中缓存，不重复解析
             try
             {
                 _smtc = MediaSessions.GetNowPlaying(_bridgeJsonPath);
@@ -191,11 +209,19 @@ public sealed class Plugin : IDalamudPlugin
                 }
                 catch (Exception ex)
                 {
-                    Log.Debug(ex, "后台采集失败");
+                    // 日志限流：一分钟最多一条，避免长期运行刷爆日志
+                    if (sw.ElapsedMilliseconds - lastErrorLog > 60000)
+                    {
+                        lastErrorLog = sw.ElapsedMilliseconds;
+                        Log.Debug(ex, "后台采集失败");
+                    }
                 }
             }
 
-            Thread.Sleep(200);
+            // 在播放：200ms 一次（进度、暂停要跟手）
+            // 没在播放：1 秒一次就够（省 CPU，长时间挂着更稳）
+            var sleep = _smtc is { IsPlaying: true } ? 200 : 1000;
+            Thread.Sleep(sleep);
         }
     }
 
@@ -265,6 +291,7 @@ public sealed class Plugin : IDalamudPlugin
         if (HonorificAvailable)
         {
             EnsureSubscribers();
+            _honorificErrorShown = true;
             ChatGui.Print("[Music Honorific] 找到 Honorific 了，称号功能可用。", CommandName);
             LastStatus = "已连上 Honorific";
         }
@@ -272,6 +299,38 @@ public sealed class Plugin : IDalamudPlugin
         {
             ChatGui.PrintError("[Music Honorific] 还是没找到 Honorific，请先安装并启用它。", CommandName);
             LastStatus = "仍未找到 Honorific";
+        }
+    }
+
+    /// <summary>
+    /// Honorific 可能比我们晚加载。开局没找到就每 2 秒再看一次，
+    /// 超过 20 秒还找不到才真正报错（避免每次进游戏都弹红字）。
+    /// </summary>
+    private void PollHonorificAvailability()
+    {
+        if (HonorificAvailable)
+            return;
+
+        if (_honorificCheckTimer.Elapsed.TotalSeconds < 2)
+            return;
+
+        _honorificCheckTimer.Restart();
+        HonorificAvailable = DetectHonorific();
+
+        if (HonorificAvailable)
+        {
+            EnsureSubscribers();
+            ChatGui.Print("[Music Honorific] 已连接 Honorific。", CommandName);
+            LastStatus = "已连上 Honorific";
+            return;
+        }
+
+        // 只在确认超过 20 秒后才提示一次
+        if (!_honorificErrorShown && _honorificErrorTimer.Elapsed.TotalSeconds > 20)
+        {
+            _honorificErrorShown = true;
+            ChatGui.PrintError("没有找到 Honorific 插件，Music Honorific 无法修改称号。", CommandName);
+            Log.Warning("超过 20 秒仍未检测到 Honorific。");
         }
     }
 
@@ -292,6 +351,9 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         _wasEnabled = true;
+
+        // Honorific 可能比我们晚加载，前 20 秒内反复确认
+        PollHonorificAvailability();
 
         // 后台线程采到新状态就应用（很便宜：只有赋值 + 一次推送）
         var snap = _snapshot;

@@ -60,21 +60,37 @@ public static class MediaSessions
         return appId;
     }
 
+    /// <summary>上次读到的文件时间 + 结果，没变就直接复用，避免每秒解析 5 次 JSON。</summary>
+    private static DateTime _cachedWriteTimeUtc;
+    private static NowPlaying? _cached;
+    private static string _cachedError = string.Empty;
+
     /// <summary>读桥接进程写的 JSON；读不到就返回 null（调用方退回窗口标题）。</summary>
     public static NowPlaying? GetNowPlaying(string jsonPath)
     {
         try
         {
-            if (!File.Exists(jsonPath))
+            var info = new FileInfo(jsonPath);
+            if (!info.Exists)
             {
                 LastError = "桥接进程还没生成数据";
                 return null;
             }
 
-            var info = new FileInfo(jsonPath);
+            // 文件没变：直接给上次的结果（最常见的情况，省掉解析和分配）
+            if (info.LastWriteTimeUtc == _cachedWriteTimeUtc)
+            {
+                LastError = _cachedError;
+                return _cached;
+            }
+
+            _cachedWriteTimeUtc = info.LastWriteTimeUtc;
+
             if (DateTime.UtcNow - info.LastWriteTimeUtc > MaxAge)
             {
                 LastError = "桥接数据太旧（进程可能没在跑）";
+                _cached = null;
+                _cachedError = LastError;
                 return null;
             }
 
@@ -85,25 +101,31 @@ public static class MediaSessions
             if (root.TryGetProperty("ok", out var okProp) && !okProp.GetBoolean())
             {
                 LastError = root.TryGetProperty("error", out var err) ? err.GetString() ?? "未知错误" : "未知错误";
+                _cached = null;
+                _cachedError = LastError;
                 return null;
             }
 
             if (root.TryGetProperty("none", out var noneProp) && noneProp.GetBoolean())
             {
                 LastError = string.Empty;
+                _cached = null;
+                _cachedError = string.Empty;
                 return null;
             }
 
             if (!root.TryGetProperty("appId", out var appIdProp))
             {
                 LastError = string.Empty;
+                _cached = null;
+                _cachedError = string.Empty;
                 return null;
             }
 
             var appId = appIdProp.GetString() ?? string.Empty;
             LastError = string.Empty;
 
-            return new NowPlaying(
+            var result = new NowPlaying(
                 appId,
                 DisplayFor(appId),
                 root.TryGetProperty("title", out var t) ? t.GetString() ?? string.Empty : string.Empty,
@@ -112,10 +134,16 @@ public static class MediaSessions
                 root.TryGetProperty("position", out var pos) && pos.TryGetDouble(out var pv) ? pv : 0,
                 root.TryGetProperty("duration", out var dur) && dur.TryGetDouble(out var dv) ? dv : 0,
                 root.TryGetProperty("at", out var at) && at.TryGetInt64(out var av) ? av : 0);
+
+            _cached = result;
+            _cachedError = string.Empty;
+            return result;
         }
         catch (Exception ex)
         {
             LastError = $"{ex.GetType().Name}: {ex.Message}";
+            _cached = null;
+            _cachedError = LastError;
             return null;
         }
     }
