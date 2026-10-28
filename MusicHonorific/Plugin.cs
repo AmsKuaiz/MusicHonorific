@@ -87,6 +87,10 @@ public sealed class Plugin : IDalamudPlugin
     private volatile bool _loggedIn;
     private bool _bridgeStarted;
 
+    /// <summary>桥接没数据多久了；用来判断要不要杀掉重启。</summary>
+    private readonly Stopwatch _bridgeStuckTimer = Stopwatch.StartNew();
+    private readonly Stopwatch _lastBridgeHeal = Stopwatch.StartNew();
+
     private volatile bool _running = true;
     private Thread? _smtcThread;
     private string _bridgeDir = string.Empty;
@@ -286,6 +290,45 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
+    /// <summary>
+    /// 桥接自愈：数据一直拿不到，可能是旧版本遗留的桥接进程占着位置
+    /// （它写的是别的文件，新的起不来）。杀掉重启一次。
+    /// </summary>
+    private void HealBridgeIfStuck()
+    {
+        if (!_bridgeStarted || _smtc is not null)
+        {
+            _bridgeStuckTimer.Restart();
+            return;
+        }
+
+        if (_bridgeStuckTimer.Elapsed.TotalSeconds < 10)
+            return;
+
+        // 一分钟最多救一次，避免反复杀进程
+        if (_lastBridgeHeal.Elapsed.TotalSeconds < 60)
+            return;
+
+        _lastBridgeHeal.Restart();
+        _bridgeStuckTimer.Restart();
+
+        try
+        {
+            foreach (var p in Process.GetProcessesByName("SmtcBridge"))
+            {
+                try { p.Kill(); } catch { }
+                finally { p.Dispose(); }
+            }
+
+            Log.Warning("桥接数据缺失，已重启桥接进程");
+            StartBridge();
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "重启桥接失败");
+        }
+    }
+
     public void ToggleWindow() => _windowOpen = !_windowOpen;
 
     /// <summary>Honorific 装了并且启用了吗。</summary>
@@ -420,6 +463,9 @@ public sealed class Plugin : IDalamudPlugin
 
         // Honorific 可能比我们晚加载，前 20 秒内反复确认
         PollHonorificAvailability();
+
+        // 桥接拿不到数据时自愈（杀掉旧进程重启）
+        HealBridgeIfStuck();
 
         // 后台线程采到新状态就应用（很便宜：只有赋值 + 一次推送）
         var snap = _snapshot;
@@ -878,9 +924,9 @@ public sealed class Plugin : IDalamudPlugin
         };
     }
 
-    /// <summary>有没有哪一行放不下（按当前规则判断）。</summary>
+    /// <summary>有没有哪一行「完全没法显示」（按当前超长规则判断）。</summary>
     public bool AnyLineTooLong
-        => Config.Lines.Any(l => RenderLine(l).Length > MaxTitleLength);
+        => Config.Lines.Any(l => FitLine(l) is null);
 
     /// <summary>是不是所有行都放不下（那整轮都没东西显示）。</summary>
     public bool AllLinesTooLong
@@ -1374,19 +1420,19 @@ public sealed class Plugin : IDalamudPlugin
         {
             ImGui.Spacing();
             ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f),
-                $"超过称号限制字数（上限 {MaxTitleLength} 字），暂时无法修改");
+                $"这些行放不下（上限 {MaxTitleLength} 字），暂时无法修改");
 
             foreach (var line in Config.Lines)
             {
-                var rendered = RenderLine(line);
-                if (rendered.Length <= MaxTitleLength)
+                if (FitLine(line) is not null)
                     continue;
 
+                var rendered = RenderLine(line);
                 ImGui.TextColored(new Vector4(1f, 0.5f, 0.5f, 1f), $"{rendered.Length} 字：{rendered}");
             }
 
             if (AllLinesTooLong)
-                ImGui.TextDisabled("所有行都超了，轮播已停下");
+                ImGui.TextDisabled("所有行都放不下，轮播已停下");
         }
 
         if (!string.IsNullOrEmpty(MediaSessions.LastError))
