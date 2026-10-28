@@ -11,8 +11,8 @@
     "DalamudApiLevel": 15,
     "Tags": ["music", "honorific", "netease", "spotify"],
     "CategoryTags": ["other"],
-    "DownloadLinkInstall": "https://cdn.jsdelivr.net/gh/AmsKuaiz/MusicHonorific@v0.9.8/dist/MusicHonorific.zip",
-    "DownloadLinkUpdate": "https://cdn.jsdelivr.net/gh/AmsKuaiz/MusicHonorific@v0.9.8/dist/MusicHonorific.zip",
-    "IconUrl": "https://cdn.jsdelivr.net/gh/AmsKuaiz/MusicHonorific@main/MusicHonorific/images/icon.png"
+    "DownloadLinkInstall": "https://github.com/AmsKuaiz/MusicHonorific/releases/download/v0.9.8/MusicHonorific.zip",
+    "DownloadLinkUpdate": "https://github.com/AmsKuaiz/MusicHonorific/releases/download/v0.9.8/MusicHonorific.zip",
+    "IconUrl": "https://raw.githubusercontent.com/AmsKuaiz/MusicHonorific/main/MusicHonorific/images/icon.png"
   }
 ]
