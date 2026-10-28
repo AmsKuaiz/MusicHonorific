@@ -9,7 +9,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>MusicHonorific</AssemblyName>
     <RootNamespace>MusicHonorific</RootNamespace>
-    <Version>0.9.4.0</Version>
+    <Version>0.9.5.0</Version>
     <DalamudLibPath>C:\Users\32811\AppData\Roaming\XIVLauncherCN\addon\Hooks\15.0.3.8\</DalamudLibPath>
   </PropertyGroup>
 
