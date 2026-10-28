@@ -83,6 +83,10 @@ public sealed class Plugin : IDalamudPlugin
     private readonly Stopwatch _honorificErrorTimer = Stopwatch.StartNew();
     private bool _honorificErrorShown;
 
+    /// <summary>是否已经进了角色。标题界面/加载中不干活。</summary>
+    private volatile bool _loggedIn;
+    private bool _bridgeStarted;
+
     private volatile bool _running = true;
     private Thread? _smtcThread;
     private string _bridgeDir = string.Empty;
@@ -102,13 +106,22 @@ public sealed class Plugin : IDalamudPlugin
         // 配置有没有读出来 —— 读失败绝不能覆盖用户的文件，只写日志
         if (loaded is null)
         {
-            var cfgPath = Path.Combine(PluginInterface.GetPluginConfigDirectory(),
-                $"{PluginInterface.Manifest.InternalName}.json");
+            try
+            {
+                // 配置文件是 pluginConfigs\<InternalName>.json（插件自己的数据目录的上一层）
+                var dataDir = PluginInterface.GetPluginConfigDirectory();
+                var configsDir = Path.GetDirectoryName(dataDir) ?? dataDir;
+                var cfgPath = Path.Combine(configsDir, $"{PluginInterface.Manifest.InternalName}.json");
 
-            if (File.Exists(cfgPath))
-                Log.Warning($"配置读取失败（文件存在但解析不了）：{cfgPath}");
-            else
-                Log.Information($"首次运行，没有配置文件：{cfgPath}");
+                if (File.Exists(cfgPath))
+                    Log.Warning($"配置读取失败（文件存在但解析不了）：{cfgPath}");
+                else
+                    Log.Information($"首次运行，没有配置文件：{cfgPath}");
+            }
+            catch
+            {
+                Log.Information("首次运行，没有配置文件");
+            }
         }
 
         // 老配置里颜色可能是 (0,0,0)（全黑，称号会看不见）——兜底成网易云蓝
@@ -138,15 +151,27 @@ public sealed class Plugin : IDalamudPlugin
 
         // SMTC 查询交给独立进程，插件只读它写的 JSON（避免 WinRT 重复加载）
         _bridgeDir = Path.Combine(PluginInterface.AssemblyLocation.DirectoryName ?? ".", "bridge");
-        _bridgeJsonPath = Path.Combine(Path.GetTempPath(), "music-honorific-bridge.json");
-        StartBridge();
 
+        // 运行数据放到 Dalamud 的 pluginConfigs 里，不再往 %TEMP% 乱丢
+        try
+        {
+            var dataDir = PluginInterface.GetPluginConfigDirectory();
+            Directory.CreateDirectory(dataDir);
+            _bridgeJsonPath = Path.Combine(dataDir, "bridge.json");
+        }
+        catch
+        {
+            // 拿不到就退回临时目录，保证功能不断
+            _bridgeJsonPath = Path.Combine(Path.GetTempPath(), "music-honorific-bridge.json");
+        }
+
+        // 注意：这里不启动桥接进程，也不启动后台线程。
+        // 等真正登录进角色以后再启动（标题界面最卡，别在那时空跑）。
         _smtcThread = new Thread(WorkerLoop)
         {
             IsBackground = true,
             Name = "MusicHonorific.Worker",
         };
-        _smtcThread.Start();
 
         Framework.Update += OnUpdate;
         PluginInterface.UiBuilder.Draw += DrawUi;
@@ -176,6 +201,7 @@ public sealed class Plugin : IDalamudPlugin
     /// 后台循环：读桥接 JSON + 按间隔做一次「重活」（枚举进程、COM 音频会话）。
     /// 这些全在主线程做会明显掉帧，所以统一放这里。
     /// <para>没在播放时降低检查频率，长时间挂着也不占资源。</para>
+    /// <para>没登录角色时完全空转（标题界面最吃资源，不跟着抢）。</para>
     /// </summary>
     private void WorkerLoop()
     {
@@ -185,6 +211,14 @@ public sealed class Plugin : IDalamudPlugin
 
         while (_running)
         {
+            // 还没进游戏 / 正在加载：什么都不做
+            if (!_loggedIn)
+            {
+                _smtc = null;
+                Thread.Sleep(1000);
+                continue;
+            }
+
             // 读桥接文件：文件没变会命中缓存，不重复解析
             try
             {
@@ -338,6 +372,38 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnUpdate(IFramework framework)
     {
+        // 只有真正进了角色才干活。
+        // 标题界面、角色选择、加载地图这些阶段游戏最吃资源，不跟它抢。
+        var loggedIn = ClientState.IsLoggedIn && ObjectTable.LocalPlayer is not null;
+
+        if (loggedIn != _loggedIn)
+        {
+            _loggedIn = loggedIn;
+
+            if (loggedIn)
+            {
+                // 第一次进游戏：这时候才拉桥接进程 + 启动后台线程
+                if (!_bridgeStarted)
+                {
+                    _bridgeStarted = true;
+                    StartBridge();
+                    _smtcThread?.Start();
+                }
+
+                _forcePoll = true;
+            }
+            else
+            {
+                // 退回标题/掉线：把称号撤掉，别挂着上一条
+                ClearTitle();
+                _lastRawTitle = string.Empty;
+                _lastPayload = string.Empty;
+            }
+        }
+
+        if (!_loggedIn)
+            return;
+
         // 关掉插件时把称号撤掉；重新打开再照常推
         if (!Config.Enabled)
         {
