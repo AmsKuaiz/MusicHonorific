@@ -128,9 +128,9 @@ public sealed class Plugin : IDalamudPlugin
             }
         }
 
-        // 老配置里颜色可能是 (0,0,0)（全黑，称号会看不见）——兜底成网易云蓝
-        if (Config.Color == Vector3.Zero)
-            Config.Color = new Vector3(0.45f, 0.78f, 1.00f);
+        // 注意：这里绝对不要动 Config 里的颜色。
+        // 用户可能故意用 (0,0,0) 配渐变（比如 Black & White 色板），
+        // 以前在这里改成蓝色，会在他下次保存时把配置永久覆盖掉。
 
         // Honorific 的 IPC 即使对方没装也能「拿到订阅者」，只有真正调用才报错，
         // 所以这里查插件列表来判断对方在不在。
@@ -956,6 +956,8 @@ public sealed class Plugin : IDalamudPlugin
 
         try
         {
+            // 用户改什么颜色就用什么颜色，包括 (0,0,0)。
+            // 以前这里把纯黑偷偷换成蓝色，重启后颜色会「自己变回去」，那个行为已经删掉了。
             object? color = Config.UseColor
                 ? new { X = Config.Color.X, Y = Config.Color.Y, Z = Config.Color.Z }
                 : null;
@@ -1380,6 +1382,13 @@ public sealed class Plugin : IDalamudPlugin
             {
                 Config.Color = c;
                 changed = true;
+            }
+
+            // 纯黑 + 不用渐变 = 称号会看不见，只提示，不改用户的值
+            if (Config.Color == Vector3.Zero && Config.GradientMode == -2)
+            {
+                ImGui.SameLine();
+                ImGui.TextColored(new Vector4(1f, 0.6f, 0.3f, 1f), "纯黑且没用渐变，称号可能看不见");
             }
 
             if (Config.GradientMode == -1)

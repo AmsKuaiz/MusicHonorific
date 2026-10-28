@@ -4,7 +4,7 @@
   "Punchline": "把正在播放的歌，显示成游戏里的称号",
   "Description": "支持网易云音乐、QQ音乐、Apple Music、Spotify。读取播放器窗口标题里的「歌名 - 歌手」，通过 Honorific 的 IPC 显示为角色称号，支持多行轮播、渐变与发光。不需要账号、API 密钥或额外播放器。",
   "InternalName": "MusicHonorific",
-  "AssemblyVersion": "0.9.6.0",
+  "AssemblyVersion": "0.9.8.0",
   "RepoUrl": "",
   "ApplicableVersion": "any",
   "DalamudApiLevel": 15,
