@@ -913,15 +913,94 @@ public sealed class Plugin : IDalamudPlugin
 
         return Config.OverflowMode switch
         {
-            // 只留歌名
-            1 => string.IsNullOrWhiteSpace(_current.Song)
-                ? null
-                : Truncate(_current.Song),
+            // 只留歌名（但保留模板里的装饰符号，比如 ♪ ♥）
+            1 => SongOnly(template),
             // 直接截断
             2 => Truncate(text),
             // 跳过这一行
             _ => null,
         };
+    }
+
+    /// <summary>
+    /// 「只显示歌名」：把除 {song} 以外的占位全清掉，但保留用户写的装饰符号。
+    /// 装饰本身太长时，才退化成纯歌名。
+    /// </summary>
+    private string? SongOnly(string template)
+    {
+        var song = _current.Song?.Trim() ?? string.Empty;
+        if (song.Length == 0)
+            return null;
+
+        var t = template;
+
+        // 「只显示歌名」本来就不要歌手，所以把「 - {artist}」整段去掉，
+        // 否则会留下孤零零的横杠（♥♡♥♪ 歌名 - ♪♥♡♥）。
+        t = t.Replace(" - {artist}", string.Empty).Replace("{artist} - ", string.Empty);
+
+        t = t
+            .Replace("{artist}", string.Empty)
+            .Replace("{app}", string.Empty)
+            .Replace("{bar}", string.Empty)
+            .Replace("{pct}", string.Empty)
+            .Replace("{pos}", string.Empty)
+            .Replace("{len}", string.Empty)
+            .Replace("{elapsed}", string.Empty);
+
+        // 这行模板里压根没有 {song} —— 那「只显示歌名」就真的是纯歌名
+        var idx = t.IndexOf("{song}", StringComparison.Ordinal);
+        if (idx < 0)
+            return Truncate(song);
+
+        var before = Collapse(t[..idx]).TrimEnd(' ', '-');
+        var after = Collapse(t[(idx + "{song}".Length)..]).TrimStart(' ', '-');
+
+        var budget = MaxTitleLength - before.Length - after.Length;
+
+        // 装饰就占了 32 字以上 —— 只能放弃装饰
+        if (budget <= 0)
+            return Truncate(song);
+
+        var fitted = song.Length <= budget
+            ? song
+            : budget <= 1
+                ? song[..budget]
+                : song[..(budget - 1)] + "…";
+
+        var result = Collapse(before + fitted + after);
+        return result.Length == 0 ? null : result;
+    }
+
+    /// <summary>把多余空白压成一个空格，并去掉两头的空白和孤立的横杠。</summary>
+    private static string Collapse(string s)
+    {
+        if (string.IsNullOrEmpty(s))
+            return string.Empty;
+
+        var sb = new System.Text.StringBuilder(s.Length);
+        var lastSpace = false;
+
+        foreach (var ch in s)
+        {
+            if (char.IsWhiteSpace(ch))
+            {
+                if (!lastSpace)
+                    sb.Append(' ');
+                lastSpace = true;
+            }
+            else
+            {
+                sb.Append(ch);
+                lastSpace = false;
+            }
+        }
+
+        var text = sb.ToString().Trim();
+
+        // 「♪ - ♥」这种空槽留下的横杠清掉
+        text = text.Replace(" -  ", " ").Replace("  - ", " ");
+
+        return text.Trim();
     }
 
     /// <summary>有没有哪一行「完全没法显示」（按当前超长规则判断）。</summary>
