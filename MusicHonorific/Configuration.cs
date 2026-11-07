@@ -114,4 +114,10 @@ public class Configuration : IPluginConfiguration
     /// <summary>认不出的标题（比如「网易云音乐」）就不覆盖。</summary>
     public string[] IgnoreTitles = { "网易云音乐", "NetEase Cloud Music", "cloudmusic" };
 
+    /// <summary>
+    /// 游戏字体显示不了的字符（韩文、emoji 等）怎么处理：
+    /// 0 = 删掉、1 = 换成「·」。
+    /// </summary>
+    public int UnsupportedCharMode = 0;
+
 }

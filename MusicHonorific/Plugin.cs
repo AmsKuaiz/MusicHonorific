@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -889,6 +889,14 @@ public sealed class Plugin : IDalamudPlugin
         "直接截断",
     };
 
+    /// <summary>游戏字体显示不了的字符怎么处理，顺序对应 Configuration.UnsupportedCharMode。</summary>
+    private static readonly string[] UnsupportedCharModes =
+    {
+        "直接删掉",
+        "换成「·」",
+        "韩文转罗马音",
+    };
+
     /// <summary>Honorific 的称号上限（源码里 MaxTitleLength = 32）。</summary>
     private const int MaxTitleLength = 32;
 
@@ -1011,11 +1019,184 @@ public sealed class Plugin : IDalamudPlugin
     public bool AllLinesTooLong
         => Config.Lines.Length > 0 && Config.Lines.All(l => FitLine(l) is null);
 
+    /// <summary>
+    /// 游戏字体没有的字形（韩文、emoji、生僻符号）会被画成「=」之类的占位符，
+    /// 所以推给 Honorific 之前先按设置处理掉。
+    /// <para>模式 2 会把韩文转成罗马音（사랑해요 → saranghaeyo）。</para>
+    /// </summary>
+    private string SanitizeForGame(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return text;
+
+        var mode = Math.Clamp(Config.UnsupportedCharMode, 0, 2);
+        var sb = new System.Text.StringBuilder(text.Length + 16);
+        var changed = false;
+
+        for (var i = 0; i < text.Length; i++)
+        {
+            var c = text[i];
+
+            // 韩文音节（完整一个字）—— 能转罗马音就转
+            if (c >= '\uAC00' && c <= '\uD7AF')
+            {
+                changed = true;
+                if (mode == 2)
+                    sb.Append(RomanizeSyllable(c));
+                else if (mode == 1)
+                    sb.Append('·');
+                continue;
+            }
+
+            // 单独出现的谚文字母
+            if (IsHangulJamo(c))
+            {
+                changed = true;
+                if (mode == 2)
+                    sb.Append(RomanizeJamo(c));
+                else if (mode == 1)
+                    sb.Append('·');
+                continue;
+            }
+
+            // emoji 这类非 BMP 字符：整对丢掉
+            if (char.IsHighSurrogate(c) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
+            {
+                changed = true;
+                i++;
+                if (mode == 1)
+                    sb.Append('·');
+                continue;
+            }
+
+            if (IsUnsupportedChar(c))
+            {
+                changed = true;
+                if (mode == 1)
+                    sb.Append('·');
+                continue;
+            }
+
+            sb.Append(c);
+        }
+
+        if (!changed)
+            return text;
+
+        // 处理完常留下「♪  - 」「 · 」这种空洞，顺手压平
+        return Collapse(sb.ToString()).Trim(' ', '-', '·');
+    }
+
+    private static bool IsHangulJamo(char c)
+        => (c >= '\u1100' && c <= '\u11FF')
+        || (c >= '\u3130' && c <= '\u318F')
+        || (c >= '\uA960' && c <= '\uA97F')
+        || (c >= '\uD7B0' && c <= '\uD7FF');
+
+    // 韩文罗马音（国语罗马字表）
+    private static readonly string[] RomInitial =
+    {
+        "g", "kk", "n", "d", "tt", "r", "m", "b", "pp", "s", "ss", "", "j", "jj", "ch", "k", "t", "p", "h",
+    };
+
+    private static readonly string[] RomVowel =
+    {
+        "a", "ae", "ya", "yae", "eo", "e", "yeo", "ye", "o", "wa", "wae",
+        "oe", "yo", "u", "wo", "we", "wi", "yu", "eu", "ui", "i",
+    };
+
+    private static readonly string[] RomFinal =
+    {
+        "", "k", "k", "k", "n", "n", "n", "t", "l", "k", "m", "p", "l", "l", "l", "l",
+        "m", "p", "p", "t", "t", "ng", "t", "t", "k", "t", "p", "t",
+    };
+
+    /// <summary>把一个韩文音节（가~힣）拆成初声/中声/终声再拼成罗马音。</summary>
+    private static string RomanizeSyllable(char c)
+    {
+        var s = c - '\uAC00';
+        if (s < 0 || s > 11171)
+            return string.Empty;
+
+        var initial = s / 588;
+        var vowel = s % 588 / 28;
+        var final = s % 28;
+
+        return RomInitial[initial] + RomVowel[vowel] + RomFinal[final];
+    }
+
+    /// <summary>单独的谚文字母（不是完整音节）大致转写。</summary>
+    private static string RomanizeJamo(char c) => c switch
+    {
+        '\u3131' or '\u1100' => "g",
+        '\u3132' or '\u1101' => "kk",
+        '\u3134' or '\u1102' => "n",
+        '\u3137' or '\u1103' => "d",
+        '\u3138' or '\u1104' => "tt",
+        '\u3139' or '\u1105' => "r",
+        '\u3141' or '\u1106' => "m",
+        '\u3142' or '\u1107' => "b",
+        '\u3143' or '\u1108' => "pp",
+        '\u3145' or '\u1109' => "s",
+        '\u3146' or '\u110A' => "ss",
+        '\u3147' or '\u110B' => "",
+        '\u3148' or '\u110C' => "j",
+        '\u3149' or '\u110D' => "jj",
+        '\u314A' or '\u110E' => "ch",
+        '\u314B' or '\u110F' => "k",
+        '\u314C' or '\u1110' => "t",
+        '\u314D' or '\u1111' => "p",
+        '\u314E' or '\u1112' => "h",
+        '\u314F' or '\u1161' => "a",
+        '\u3150' or '\u1162' => "ae",
+        '\u3151' or '\u1163' => "ya",
+        '\u3152' or '\u1164' => "yae",
+        '\u3153' or '\u1165' => "eo",
+        '\u3154' or '\u1166' => "e",
+        '\u3155' or '\u1167' => "yeo",
+        '\u3156' or '\u1168' => "ye",
+        '\u3157' or '\u1169' => "o",
+        '\u3158' or '\u116A' => "wa",
+        '\u3159' or '\u116B' => "wae",
+        '\u315A' or '\u116C' => "oe",
+        '\u315B' or '\u116D' => "yo",
+        '\u315C' or '\u116E' => "u",
+        '\u315D' or '\u116F' => "wo",
+        '\u315E' or '\u1170' => "we",
+        '\u315F' or '\u1171' => "wi",
+        '\u3160' or '\u1172' => "yu",
+        '\u3161' or '\u1173' => "eu",
+        '\u3162' or '\u1174' => "ui",
+        '\u3163' or '\u1175' => "i",
+        _ => string.Empty,
+    };
+
+    /// <summary>游戏字体里没有的字符范围（韩文/谚文、变体符等）。</summary>
+    private static bool IsUnsupportedChar(char c)
+        => (c >= '\u1100' && c <= '\u11FF')   // 谚文字母
+        || (c >= '\u3130' && c <= '\u318F')   // 谚文兼容字母
+        || (c >= '\uA960' && c <= '\uA97F')   // 谚文字母扩展-A
+        || (c >= '\uAC00' && c <= '\uD7AF')   // 谚文音节（韩文主体）
+        || (c >= '\uD7B0' && c <= '\uD7FF')   // 谚文字母扩展-B
+        || (c >= '\uFE00' && c <= '\uFE0F')   // 变体选择符
+        || c == '\u200D';                      // 零宽连接符（emoji 组合用）
+
     private void PushTitle(string text)
     {
         if (!HonorificAvailable)
         {
             LastStatus = "Honorific 不可用";
+            return;
+        }
+
+        // 游戏字体画不出来的字符（韩文、emoji 等）先处理掉，
+        // 否则称号里会出现一排「===」占位符。
+        text = SanitizeForGame(text);
+
+        // 处理完就没东西了（整首歌名都是韩文之类）——什么都别推
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            LastStatus = "这首歌的名字游戏字体显示不了，已跳过";
             return;
         }
 
@@ -1335,6 +1516,25 @@ public sealed class Plugin : IDalamudPlugin
 
             ImGui.EndCombo();
         }
+
+        ImGui.Spacing();
+        ImGui.SetNextItemWidth(260);
+        if (ImGui.BeginCombo("韩文等特殊字符", UnsupportedCharModes[Math.Clamp(Config.UnsupportedCharMode, 0, 2)]))
+        {
+            for (var i = 0; i < UnsupportedCharModes.Length; i++)
+            {
+                if (ImGui.Selectable(UnsupportedCharModes[i], i == Config.UnsupportedCharMode))
+                {
+                    Config.UnsupportedCharMode = i;
+                    changed = true;
+                }
+            }
+
+            ImGui.EndCombo();
+        }
+
+        ImGui.SameLine();
+        ImGui.TextDisabled("（游戏字体画不出来，会变成 ===）");
 
         ImGui.Spacing();
         changed |= ImGui.Checkbox("放在名字前面", ref Config.IsPrefix);
