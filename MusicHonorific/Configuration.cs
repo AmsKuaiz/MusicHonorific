@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 using Dalamud.Configuration;
 
 namespace MusicHonorific;
@@ -118,6 +118,6 @@ public class Configuration : IPluginConfiguration
     /// 游戏字体显示不了的字符（韩文、emoji 等）怎么处理：
     /// 0 = 删掉、1 = 换成「·」。
     /// </summary>
-    public int UnsupportedCharMode = 0;
+    public int UnsupportedCharMode = 2;
 
 }

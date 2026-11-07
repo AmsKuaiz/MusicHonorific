@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -194,9 +194,33 @@ public sealed class Plugin : IDalamudPlugin
         // 卸载/停用一律把称号撤掉，不留残影
         ClearTitle();
 
+        // 把桥接进程一起收掉：以前游戏关了它还挂在后台占内存
+        if (_bridgeStarted)
+            StopBridge();
+
         CommandManager.RemoveHandler(CommandName);
         foreach (var alias in CommandAliases)
             CommandManager.RemoveHandler(alias);
+    }
+
+    /// <summary>结束桥接进程（SmtcBridge 只有本插件用，直接全杀）。</summary>
+    private void StopBridge()
+    {
+        try
+        {
+            foreach (var p in Process.GetProcessesByName("SmtcBridge"))
+            {
+                try { p.Kill(); } catch { }
+                finally { p.Dispose(); }
+            }
+
+            _bridgeStarted = false;
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "结束桥接进程失败");
+            _bridgeStarted = false;
+        }
     }
 
     private void OnCommand(string command, string args) => ToggleWindow();
@@ -291,12 +315,31 @@ public sealed class Plugin : IDalamudPlugin
     }
 
     /// <summary>
-    /// 桥接自愈：数据一直拿不到，可能是旧版本遗留的桥接进程占着位置
-    /// （它写的是别的文件，新的起不来）。杀掉重启一次。
+    /// 桥接自愈：桥接进程没在写文件（崩溃/被旧实例顶掉）时杀掉重启。
+    /// <para>注意：没在放歌时桥接会写 {"ok":true,"none":true}，那是正常的，
+    /// 不能当成「数据缺失」，否则会每分钟无故重启一次。</para>
     /// </summary>
     private void HealBridgeIfStuck()
     {
-        if (!_bridgeStarted || _smtc is not null)
+        if (!_bridgeStarted)
+        {
+            _bridgeStuckTimer.Restart();
+            return;
+        }
+
+        // 判断依据是「文件还在不在刷新」，而不是「有没有歌在放」
+        var fresh = false;
+        try
+        {
+            var info = new FileInfo(_bridgeJsonPath);
+            fresh = info.Exists && (DateTime.UtcNow - info.LastWriteTimeUtc).TotalSeconds < 10;
+        }
+        catch
+        {
+            fresh = false;
+        }
+
+        if (fresh)
         {
             _bridgeStuckTimer.Restart();
             return;
